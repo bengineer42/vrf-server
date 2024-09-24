@@ -8,6 +8,8 @@ pub mod vrf_consumer {
     pub mod vrf_consumer_example;
 }
 
+pub mod utils;
+use vrf_contracts::utils::{make_seed, get_as_caller};
 
 #[cfg(test)]
 mod tests;

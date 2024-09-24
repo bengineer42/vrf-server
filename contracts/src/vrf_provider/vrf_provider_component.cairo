@@ -6,30 +6,28 @@ trait IVrfProvider<TContractState> {
     fn request_random(
         ref self: TContractState,
         consumer: ContractAddress,
-        entrypoint: felt252,
-        calldata: Array<felt252>,
-        nonce: felt252
+        key: felt252,
+        as_caller: bool,        
     ) -> felt252;
 
     fn submit_random(ref self: TContractState, seed: felt252, proof: Proof);
 
-    fn consume_random(ref self: TContractState, caller: ContractAddress, seed: felt252) -> felt252;
+    fn consume_random(ref self: TContractState, caller: ContractAddress, key: felt252) -> felt252;
 
     fn get_random(self: @TContractState, seed: felt252) -> felt252;
 
     fn get_nonce(
-        self: @TContractState, consumer: ContractAddress, caller: ContractAddress,
+        self: @TContractState, consumer: ContractAddress, caller: ContractAddress, key: felt252
     ) -> felt252;
 
     fn get_seed_for_call(
         self: @TContractState,
         caller: ContractAddress,
-        entrypoint: felt252,
-        calldata: Array<felt252>,
+        key: felt252,
     ) -> felt252;
 
     fn get_commit(
-        self: @TContractState, consumer: ContractAddress, caller: ContractAddress
+        self: @TContractState, consumer: ContractAddress, caller: ContractAddress, key: felt252
     ) -> felt252;
 
     fn get_status(self: @TContractState, seed: felt252) -> RequestStatus;
@@ -47,8 +45,7 @@ trait IVrfProvider<TContractState> {
 pub struct Request {
     consumer: ContractAddress,
     caller: ContractAddress,
-    entrypoint: felt252,
-    calldata: Array<felt252>,
+    key: felt252,
     nonce: felt252,
 }
 
@@ -82,10 +79,6 @@ impl PublicKeyIntoPoint of Into<PublicKey, Point> {
     }
 }
 
-//
-//
-//
-
 #[starknet::component]
 pub mod VrfProviderComponent {
     use starknet::ContractAddress;
@@ -97,16 +90,16 @@ pub mod VrfProviderComponent {
     };
 
     use super::{Request, RequestImpl, RequestTrait, RequestStatus, PublicKey};
-
-    use stark_vrf::ecvrf::{Point, Proof, ECVRF, ECVRFImpl};
+    use vrf_contracts::{make_seed, get_as_caller};
+    use stark_vrf::{ecvrf::{Point, Proof, ECVRF, ECVRFImpl}};
 
     #[storage]
     struct Storage {
         VrfProvider_pubkey: PublicKey,
-        // (contract_address, caller_address) -> nonce
-        VrfProvider_nonces: Map<(ContractAddress, ContractAddress), felt252>,
-        // (contract_address, caller_address) -> salt
-        VrfProvider_commit: Map<(ContractAddress, ContractAddress), felt252>,
+        // (contract_address, caller_address, key) -> nonce
+        VrfProvider_nonces: Map<(ContractAddress, ContractAddress, felt252), felt252>,
+        // (contract_address, caller_address, key) -> salt
+        VrfProvider_commit: Map<(ContractAddress, ContractAddress, felt252), felt252>,
         // seed -> status
         VrfProvider_request_status: Map<felt252, RequestStatus>,
         // seed -> random
@@ -122,8 +115,7 @@ pub mod VrfProviderComponent {
     struct RequestRandom {
         consumer: ContractAddress,
         caller: ContractAddress,
-        entrypoint: felt252,
-        calldata: Array<felt252>,
+        key: felt252,
         nonce: felt252,
         seed: felt252,
     }
@@ -161,51 +153,39 @@ pub mod VrfProviderComponent {
             self: @ComponentState<TContractState>,
             consumer: ContractAddress,
             caller: ContractAddress,
+            key: felt252,
         ) -> felt252 {
-            self.VrfProvider_nonces.read((consumer, caller)) + 1
+            self.VrfProvider_nonces.read((consumer, caller, key)) + 1
         }
 
         // directly called by user to request randomness for a contract / entrypoint / calldata
         fn request_random(
             ref self: ComponentState<TContractState>,
             consumer: ContractAddress,
-            entrypoint: felt252,
-            calldata: Array<felt252>,
-            nonce: felt252, // allow off-chain computation, must be valid
+            key: felt252,
+            as_caller: bool,
         ) -> felt252 {
-            let caller = get_caller_address();
+
+            let caller = get_as_caller(as_caller);
 
             // revert if user already requesting
-            let is_committed = self.is_committed(consumer, caller);
+            let is_committed = self.is_committed(consumer, caller, key);
             assert(!is_committed, Errors::ALREADY_COMMITTED);
 
-            let mut curr_nonce = self.VrfProvider_nonces.read((consumer, caller));
-            curr_nonce += 1;
-            // check submitted nonce matches
-            assert(nonce == curr_nonce, Errors::INVALID_NONCE);
-            self.VrfProvider_nonces.write((consumer, caller), nonce);
+            let nonce = self.VrfProvider_nonces.read((consumer, caller, key)) + 1;
+            self.VrfProvider_nonces.write((consumer, caller, key), nonce);
 
-            let request = Request { consumer, caller, entrypoint, calldata, nonce };
-
-            let seed = request.hash();
-            self.commit(consumer, caller, seed);
+            let seed = make_seed(consumer, caller, key, nonce);
+            self.commit(consumer, caller, key, seed);
 
             self.VrfProvider_request_status.write(seed, RequestStatus::Received);
             self
                 .emit(
-                    RequestRandom {
-                        consumer: request.consumer,
-                        caller: request.caller,
-                        entrypoint: request.entrypoint,
-                        calldata: request.calldata,
-                        nonce: request.nonce,
-                        seed,
-                    }
+                    RequestRandom {consumer, caller, key, nonce, seed}
                 );
-
             seed
         }
-
+        
         // called by executors
         fn submit_random(ref self: ComponentState<TContractState>, seed: felt252, proof: Proof) {
             // TODO: check allowed ?
@@ -220,7 +200,7 @@ pub mod VrfProviderComponent {
             let ecvrf = ECVRFImpl::new(pubkey);
 
             let random = ecvrf.verify(proof.clone(), array![seed.clone()].span()).unwrap();
-
+            
             // write random
             self.VrfProvider_request_random.write(seed, random);
             // update request status
@@ -233,41 +213,30 @@ pub mod VrfProviderComponent {
         fn get_seed_for_call(
             self: @ComponentState<TContractState>,
             caller: ContractAddress,
-            entrypoint: felt252,
-            calldata: Array<felt252>,
+            key: felt252,
         ) -> felt252 {
-            let consumer = get_caller_address();
-
-            let nonce = self.VrfProvider_nonces.read((consumer, caller));
-
-            let request = Request { consumer, caller, entrypoint, calldata, nonce };
-
-            request.hash()
+            self.get_seed(get_caller_address(), caller,  key)
         }
 
         fn get_commit(
             self: @ComponentState<TContractState>,
             consumer: ContractAddress,
-            caller: ContractAddress
+            caller: ContractAddress,
+            key: felt252
         ) -> felt252 {
-            self.VrfProvider_commit.read((consumer, caller))
+            self.VrfProvider_commit.read((consumer, caller, key))
         }
 
         fn get_status(self: @ComponentState<TContractState>, seed: felt252) -> RequestStatus {
             self.VrfProvider_request_status.read(seed)
         }
-
         fn consume_random(
-            ref self: ComponentState<TContractState>, caller: ContractAddress, seed: felt252
+            ref self: ComponentState<TContractState>, caller: ContractAddress, key: felt252
         ) -> felt252 {
             let consumer = get_caller_address();
-
             // clear user commit
-            self.clear_commit(consumer, caller);
-
-            let random = self.VrfProvider_request_random.read(seed);
-
-            random
+            self.clear_commit(consumer, caller, key);
+            self.VrfProvider_request_random.read(self.get_seed(consumer, caller, key))
         }
 
         fn get_random(self: @ComponentState<TContractState>, seed: felt252) -> felt252 {
@@ -293,7 +262,10 @@ pub mod VrfProviderComponent {
         fn initializer(ref self: ComponentState<TContractState>, pubkey: PublicKey) {
             self._set_public_key(pubkey);
         }
-
+        fn get_seed(self: @ComponentState<TContractState>, consumer: ContractAddress, caller: ContractAddress, key: felt252) -> felt252 {
+            let nonce = self.VrfProvider_nonces.read((consumer, caller, key));
+            make_seed(consumer, caller, key, nonce)
+        }
         fn _set_public_key(ref self: ComponentState<TContractState>, new_pubkey: PublicKey) {
             assert(new_pubkey.x != 0 && new_pubkey.y != 0, Errors::PUBKEY_ZERO);
             self.VrfProvider_pubkey.write(new_pubkey);
@@ -304,26 +276,29 @@ pub mod VrfProviderComponent {
         fn is_committed(
             self: @ComponentState<TContractState>,
             consumer: ContractAddress,
-            caller: ContractAddress
+            caller: ContractAddress,
+            key: felt252,
         ) -> bool {
-            self.VrfProvider_commit.read((consumer, caller)) != 0
+            self.VrfProvider_commit.read((consumer, caller, key)) != 0
         }
 
         fn commit(
             ref self: ComponentState<TContractState>,
             consumer: ContractAddress,
             caller: ContractAddress,
+            key: felt252,
             seed: felt252
         ) {
-            self.VrfProvider_commit.write((consumer, caller), seed)
+            self.VrfProvider_commit.write((consumer, caller, key), seed)
         }
 
         fn clear_commit(
             ref self: ComponentState<TContractState>,
             consumer: ContractAddress,
             caller: ContractAddress,
+            key: felt252,
         ) {
-            self.VrfProvider_commit.write((consumer, caller), 0)
+            self.VrfProvider_commit.write((consumer, caller, key), 0)
         }
     }
 }

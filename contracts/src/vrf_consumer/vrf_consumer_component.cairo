@@ -11,7 +11,6 @@ trait IVrfConsumer<TContractState> {
     fn get_vrf_provider_public_key(self: @TContractState) -> PublicKey;
 }
 
-
 #[starknet::component]
 pub mod VrfConsumerComponent {
     use starknet::{
@@ -26,10 +25,10 @@ pub mod VrfConsumerComponent {
 
     use stark_vrf::ecvrf::{Point, Proof, ECVRF, ECVRFImpl};
 
-    use vrf_contracts::vrf_provider::vrf_provider_component::{
+    use vrf_contracts::{vrf_provider::vrf_provider_component::{
         IVrfProvider, IVrfProviderDispatcher, IVrfProviderDispatcherTrait, PublicKey, RequestStatus,
         PublicKeyIntoPoint
-    };
+    }, get_as_caller};
 
     #[storage]
     struct Storage {
@@ -93,47 +92,33 @@ pub mod VrfConsumerComponent {
         }
 
         fn get_seed_for_call(
-            self: @ComponentState<TContractState>, entrypoint: felt252, calldata: Array<felt252>
+            self: @ComponentState<TContractState>, key: felt252, as_caller: bool
         ) -> felt252 {
-            let caller = get_caller_address();
-            self.vrf_provider_disp().get_seed_for_call(caller, entrypoint, calldata)
+            self.get_seed_as_caller(get_as_caller(as_caller), key)
         }
 
-        fn get_commit(self: @ComponentState<TContractState>,) -> felt252 {
-            let consumer = get_contract_address();
-            let caller = get_caller_address();
-
-            self.vrf_provider_disp().get_commit(consumer, caller)
+        fn get_seed_as_caller(
+            self: @ComponentState<TContractState>, caller: ContractAddress, key: felt252
+        ) -> felt252 {
+            self.vrf_provider_disp().get_seed_for_call(caller, key)
         }
 
-        fn assert_call_match_commit<T, +Drop<T>, +Serde<T>>(
-            self: @ComponentState<TContractState>, entrypoint: felt252, calldata: T
-        ) -> felt252 {
-            let mut serialized = array![];
-            calldata.serialize(ref serialized);
 
-            // get seed for call
-            let seed = self.get_seed_for_call(entrypoint, serialized);
-
-            // get committed seed
-            let committed = self.get_commit();
-
-            assert(seed == committed, Errors::COMMIT_MISMATCH);
-
-            seed
+        fn get_commit(self: @ComponentState<TContractState>, key:felt252, as_caller: bool) -> felt252 {
+            self.vrf_provider_disp().get_commit(get_contract_address(), get_as_caller(as_caller), key)
         }
 
         fn assert_fulfilled_and_consume(
-            self: @ComponentState<TContractState>, seed: felt252
+            self: @ComponentState<TContractState>, key:felt252, as_caller: bool, seed: felt252
         ) -> felt252 {
-            let caller = get_caller_address();
 
             let status = self.vrf_provider_disp().get_status(seed);
+            let caller = get_as_caller(as_caller);
             assert(status == RequestStatus::Fulfilled, Errors::REQUEST_NOT_FULFILLED);
+            assert(self.get_seed_as_caller(caller, key) == seed, Errors::COMMIT_MISMATCH);
 
             // consume random & uncommit caller
-            let random = self.vrf_provider_disp().consume_random(caller, seed);
-
+            let random = self.vrf_provider_disp().consume_random(caller, key);
             random
         }
 

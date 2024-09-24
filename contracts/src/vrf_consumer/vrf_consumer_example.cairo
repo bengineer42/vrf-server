@@ -8,6 +8,7 @@ pub struct PredictParams {
 
 #[starknet::interface]
 trait IVrfConsumerExample<TContractState> {
+    fn set_seed(ref self: TContractState, seed: felt252);
     fn predict(ref self: TContractState, params: PredictParams);
     fn get_score(self: @TContractState, player: starknet::ContractAddress) -> u32;
 }
@@ -45,6 +46,7 @@ mod VrfConsumer {
         #[substorage(v0)]
         vrf_consumer: VrfConsumerComponent::Storage,
         scores: Map<ContractAddress, u32>,
+        seed: Map<ContractAddress, felt252>,
     }
 
     #[event]
@@ -54,6 +56,7 @@ mod VrfConsumer {
         OwnableEvent: OwnableComponent::Event,
         #[flat]
         VrfConsumerEvent: VrfConsumerComponent::Event,
+        
     }
 
     #[constructor]
@@ -80,11 +83,14 @@ mod VrfConsumer {
         // wait for request to be fulfilled 
         // call consumer_contract.entrypoint(calldata)
 
+        fn set_seed(ref self: ContractState, seed: felt252) {
+            self.seed.write(get_caller_address(), seed);
+        }
+
         fn predict(ref self: ContractState, params: PredictParams) {
-            // check if call match with commit
-            let seed = self.vrf_consumer.assert_call_match_commit('predict', params);
             // retrieve random & clear commit
-            let random = self.vrf_consumer.assert_fulfilled_and_consume(seed);
+            let seed = self.seed.read(get_caller_address());
+            let random = self.vrf_consumer.assert_fulfilled_and_consume('this-key', true, seed);
 
             let random: u256 = random.into();
             let value: u32 = (random % 10).try_into().unwrap();
