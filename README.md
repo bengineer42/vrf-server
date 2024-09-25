@@ -50,13 +50,14 @@ See https://github.com/dojoengine/stark-vrf
 
 ```rust
 fn request_random(
-        ref self: TContractState, consumer: ContractAddress, key: felt252, as_caller: bool,
+        ref self: TContractState, consumer: ContractAddress, caller: ContractAddress, key: felt252
     ) -> felt252
 ```
 
 The arguments are:
 
 - consumer: `ContractAddress` The contract that will consume the random
+- caller: `ContractAddress`: The caller of the request randomness function
 - key: `felt252` a key so multiple random calls can be done separately by the same contract (could be a hash of other data such as call data)
 - as_caller: `bool` Whether the random is user specific or not
 
@@ -73,6 +74,8 @@ struct RequestRandom {
   seed: felt252,
 }
 ```
+
+This can either be called by a user or by the contract if it needs to be wrapped in other logic
 
 ### [submit_random](./contracts/src/vrf_provider/vrf_provider_component.cairo#182)
 

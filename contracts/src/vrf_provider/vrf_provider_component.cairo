@@ -2,14 +2,15 @@ use starknet::ContractAddress;
 use stark_vrf::ecvrf::{Point, Proof, ECVRF, ECVRFImpl};
 use core::num::traits::Zero;
 
-
 #[starknet::interface]
-trait IVrfProvider<TContractState> {
-    fn request_random(
+pub trait IVrf<TContractState>{
+    fn request_random_as_caller(
         ref self: TContractState, consumer: ContractAddress, key: felt252, as_caller: bool,
-    ) -> felt252;
+    ) -> felt252; 
 
-    fn submit_random(ref self: TContractState, seed: felt252, proof: Proof);
+    fn request_random_as_contract(
+        ref self: TContractState, caller: ContractAddress, key: felt252,
+    ) -> felt252;
 
     fn consume_random(ref self: TContractState, caller: ContractAddress, key: felt252) -> felt252;
 
@@ -24,6 +25,33 @@ trait IVrfProvider<TContractState> {
     fn is_consumed(self: @TContractState, seed: felt252) -> bool;
 
     fn get_public_key(self: @TContractState) -> PublicKey;
+}
+
+#[starknet::interface]
+pub trait IVrfProvider<TContractState> {
+    fn request_random_as_caller(
+        ref self: TContractState, consumer: ContractAddress, key: felt252, as_caller: bool,
+    ) -> felt252; 
+
+    fn request_random_as_contract(
+        ref self: TContractState, caller: ContractAddress, key: felt252,
+    ) -> felt252;
+
+    fn consume_random(ref self: TContractState, caller: ContractAddress, key: felt252) -> felt252;
+
+    fn get_random(self: @TContractState, seed: felt252) -> felt252;
+
+    fn get_seed_for_call(self: @TContractState, caller: ContractAddress, key: felt252,) -> felt252;
+
+    fn get_status(self: @TContractState, caller: ContractAddress, key: felt252) -> RequestStatus;
+
+    fn is_submitted(self: @TContractState, seed: felt252) -> bool;
+
+    fn is_consumed(self: @TContractState, seed: felt252) -> bool;
+
+    fn get_public_key(self: @TContractState) -> PublicKey;
+    
+    fn submit_random(ref self: TContractState, seed: felt252, proof: Proof);
 
     fn set_public_key(ref self: TContractState, new_pubkey: PublicKey);
 }
@@ -143,6 +171,7 @@ pub mod VrfProviderComponent {
         pub const ALREADY_SUBMITTED: felt252 = 'VrfProvider: already submitted';
         pub const NOT_SUBMITTED: felt252 = 'VrfProvider: not submitted';
         pub const ALREADY_CONSUMED: felt252 = 'VrfProvider: already consumed';
+        pub const NOT_CONSUMED: felt252 = 'VrfProvider: not consumed';
     }
 
     #[embeddable_as(VrfProviderImpl)]
@@ -153,7 +182,7 @@ pub mod VrfProviderComponent {
         impl Owner: OwnableComponent::HasComponent<TContractState>,
     > of super::IVrfProvider<ComponentState<TContractState>> {
         // directly called by user to request randomness for a contract / entrypoint / calldata
-        fn request_random(
+        fn request_random_as_caller(
             ref self: ComponentState<TContractState>,
             consumer: ContractAddress,
             key: felt252,
@@ -161,21 +190,14 @@ pub mod VrfProviderComponent {
         ) -> felt252 {
             // get caller if as_caller else return 0x0
             let caller = get_as_caller(as_caller);
+            self.request_random(consumer, caller, key)
+        }
 
-            let mut nonce = self.VrfProvider_nonces.read((consumer, caller, key));
-            if nonce.is_non_zero() {
-                assert(
-                    self.is_consumed(self.get_seed(consumer, caller, key)),
-                    'Previous request not consumed'
-                );
-            };
-            nonce += 1;
-            self.VrfProvider_nonces.write((consumer, caller, key), nonce);
-
-            let seed = make_seed(consumer, caller, key, nonce);
-
-            self.emit(RequestRandom { consumer, caller, key, nonce, seed });
-            seed
+        fn request_random_as_contract(
+            ref self: ComponentState<TContractState>, caller: ContractAddress, key: felt252,
+        ) -> felt252 {
+            let consumer = get_caller_address();
+            self.request_random(consumer, caller, key)
         }
 
         // called by executors
@@ -207,7 +229,7 @@ pub mod VrfProviderComponent {
 
             assert(random.is_non_zero(), Errors::NOT_SUBMITTED);
             assert(!self.is_consumed(seed), Errors::ALREADY_CONSUMED);
-
+            self.set_consumed(seed);
             random
         }
 
@@ -240,7 +262,7 @@ pub mod VrfProviderComponent {
         }
 
         fn is_consumed(self: @ComponentState<TContractState>, seed: felt252) -> bool {
-            self.VrfProvider_request_consumed.read(seed)
+            self._is_consumed(seed)
         }
 
 
@@ -264,8 +286,32 @@ pub mod VrfProviderComponent {
     pub impl InternalImpl<
         TContractState, +HasComponent<TContractState>
     > of InternalTrait<TContractState> {
+
+
         fn initializer(ref self: ComponentState<TContractState>, pubkey: PublicKey) {
             self._set_public_key(pubkey);
+        }
+
+
+        fn _is_consumed(self: @ComponentState<TContractState>, seed: felt252) -> bool {
+            self.VrfProvider_request_consumed.read(seed)
+        }
+
+        fn request_random(ref self: ComponentState<TContractState>, consumer: ContractAddress, caller: ContractAddress, key: felt252) -> felt252 {
+            let mut nonce = self.VrfProvider_nonces.read((consumer, caller, key));
+            if nonce.is_non_zero() {
+                assert(
+                    self._is_consumed(self.get_seed(consumer, caller, key)),
+                    Errors::NOT_CONSUMED
+                );
+            };
+            nonce += 1;
+            self.VrfProvider_nonces.write((consumer, caller, key), nonce);
+
+            let seed = make_seed(consumer, caller, key, nonce);
+
+            self.emit(RequestRandom { consumer, caller, key, nonce, seed });
+            seed
         }
 
         fn assert_pubkey_set(self: @ComponentState<TContractState>) {
