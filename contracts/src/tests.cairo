@@ -122,8 +122,6 @@ pub fn setup() -> SetupResult {
 }
 
 
-
-
 #[test]
 fn test_setup() {
     let setup = setup();
@@ -132,11 +130,9 @@ fn test_setup() {
     start_cheat_caller_address(setup.provider.contract_address, CALLER());
 
     let consumer = setup.consumer.contract_address;
-    let entrypoint = 'predict';
-    let calldata = array![7];
-    let nonce = setup.provider.get_nonce(setup.consumer.contract_address, CALLER());
+    let key = 'predict';
 
-    let seed = setup.provider.request_random(consumer, entrypoint, calldata, nonce);
+    let seed = setup.provider.request_random(consumer, key, true);
 
     println!("seed: {}", seed);
     stop_cheat_caller_address(setup.provider.contract_address);
