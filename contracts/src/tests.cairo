@@ -132,7 +132,7 @@ fn test_setup() {
     let consumer = setup.consumer.contract_address;
     let key = 'predict';
 
-    let seed = setup.provider.request_random(consumer, key, true);
+    let seed = setup.provider.request_random_as_caller(consumer, key, true);
 
     println!("seed: {}", seed);
     stop_cheat_caller_address(setup.provider.contract_address);
